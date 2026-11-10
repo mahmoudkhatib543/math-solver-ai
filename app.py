@@ -62,3 +62,19 @@ def send_message(user_id, text):
         },
         timeout=15
     )
+@app.route("/subscribe")
+def subscribe():
+    page_id = "1480480955138667"
+
+    url = f"https://graph.facebook.com/v23.0/{page_id}/subscribed_apps"
+
+    response = requests.post(
+        url,
+        params={
+            "access_token": PAGE_ACCESS_TOKEN,
+            "subscribed_fields": "messages"
+        },
+        timeout=20
+    )
+
+    return response.text, response.status_code
