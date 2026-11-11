@@ -1,109 +1,30 @@
 
 const http = require('http');
-const qrcode = require('qrcode-terminal');
 
 const PORT = process.env.PORT || 3000;
-const ALLOWED_SENDER = process.env.ALLOWED_SENDER || '';
 
 http.createServer((req, res) => {
   res.writeHead(200);
-  res.end('WhatsApp Math Bot is running!');
+  res.end('WhatsApp Gemini AI Bot is running!');
 }).listen(PORT, () => {
   console.log('Web server running on port', PORT);
 });
 
-function normalize(text) {
-  return text
-    .replace(/[٠-٩]/g, d => '٠١٢٣٤٥٦٧٨٩'.indexOf(d))
-    .replace(/×/g, '*')
-    .replace(/÷/g, '/')
-    .replace(/[−–]/g, '-')
-    .replace(/٫/g, '.')
-    .replace(/,/g, '.')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function extractText(message) {
-  if (!message) return '';
-
-  if (message.ephemeralMessage) {
-    return extractText(message.ephemeralMessage.message);
-  }
-
-  if (message.viewOnceMessage) {
-    return extractText(message.viewOnceMessage.message);
-  }
-
-  return (
-    message.conversation ||
-    message.extendedTextMessage?.text ||
-    message.documentMessage?.caption ||
-    ''
-  );
-}
-
-function solveQuestion(text, math, nerdamer) {
-  const clean = normalize(text);
-
-  // المعادلات
-  const equations = clean.match(
-    /[0-9a-zA-Z().+\-*/^ \t]+=[0-9a-zA-Z().+\-*/^ \t]+/g
-  );
-
-  if (equations) {
-    for (const equation of equations) {
-      const variables = [...new Set(
-        equation.match(/[a-zA-Z]/g) || []
-      )];
-
-      if (variables.length === 1) {
-        try {
-          const variable = variables[0];
-          const result = nerdamer
-            .solve(equation.trim(), variable)
-            .toString()
-            .replace(/^\[|\]$/g, '');
-
-          if (result && result !== '[]') {
-            return `${variable} = ${result}`;
-          }
-        } catch (e) {
-          console.log('Equation error:', e.message);
-        }
-      }
-    }
-  }
-
-  // العمليات الحسابية
-  const expressions = clean.match(
-    /[0-9][0-9().+\-*/^ \t]*[+\-*/^][0-9().+\-*/^ \t]*/g
-  );
-
-  if (expressions) {
-    for (const expression of expressions) {
-      try {
-        const result = math.evaluate(expression.trim());
-
-        if (typeof result === 'number' && Number.isFinite(result)) {
-          return String(Number(result.toFixed(8)));
-        }
-      } catch (e) {}
-    }
-  }
-
-  return null;
-}
-
 async function startBot() {
-  const {
-    default: makeWASocket,
-    useMultiFileAuthState,
-    DisconnectReason
-  } = await import('@whiskeysockets/baileys');
+  if (!process.env.GEMINI_API_KEY) {
+    throw new Error('GEMINI_API_KEY is missing');
+  }
 
-  const math = require('mathjs');
-  const nerdamer = require('nerdamer');
+  const baileys = await import('@whiskeysockets/baileys');
+  const makeWASocket = baileys.default || baileys.makeWASocket;
+  const { useMultiFileAuthState, DisconnectReason } = baileys;
+
+  const { GoogleGenAI } = await import('@google/genai');
+  const qrcode = require('qrcode-terminal');
+
+  const ai = new GoogleGenAI({
+    apiKey: process.env.GEMINI_API_KEY
+  });
 
   const { state, saveCreds } =
     await useMultiFileAuthState('./auth_info');
@@ -117,7 +38,7 @@ async function startBot() {
 
   sock.ev.on('connection.update', ({ connection, qr, lastDisconnect }) => {
     if (qr) {
-      console.log('SCAN THIS QR CODE:');
+      console.log('NEW WHATSAPP QR:');
       qrcode.generate(qr, { small: true });
     }
 
@@ -130,52 +51,154 @@ async function startBot() {
 
       if (status !== DisconnectReason.loggedOut) {
         console.log('Connection closed. Restarting...');
-        setTimeout(startBot, 5000);
+        setTimeout(() => startBot().catch(console.error), 5000);
       } else {
-        console.log('WhatsApp logged out. New pairing required.');
+        console.log('WhatsApp logged out. Pairing required.');
       }
     }
   });
 
+  function getText(message) {
+    if (!message) return '';
+
+    if (message.ephemeralMessage) {
+      return getText(message.ephemeralMessage.message);
+    }
+
+    if (message.viewOnceMessage) {
+      return getText(message.viewOnceMessage.message);
+    }
+
+    if (message.viewOnceMessageV2) {
+      return getText(message.viewOnceMessageV2.message);
+    }
+
+    return (
+      message.conversation ||
+      message.extendedTextMessage?.text ||
+      message.imageMessage?.caption ||
+      message.videoMessage?.caption ||
+      message.documentMessage?.caption ||
+      message.buttonsResponseMessage?.selectedDisplayText ||
+      message.listResponseMessage?.title ||
+      message.templateButtonReplyMessage?.selectedDisplayText ||
+      ''
+    );
+  }
+
+  async function solveWithAI(question) {
+    const response = await ai.models.generateContent({
+      model: process.env.GEMINI_MODEL || 'gemini-flash-latest',
+      contents: question,
+      config: {
+        temperature: 0.1,
+        maxOutputTokens: 400,
+        systemInstruction: `
+أنت مساعد تعليمي متخصص في حل أسئلة الطلاب.
+
+افهم السؤال باللغة العربية أو الإنجليزية.
+حل المعادلات والرياضيات والمسائل الكلامية.
+افهم أسئلة الاختيار من متعدد واختر الإجابة الصحيحة.
+إذا وصل السؤال على عدة رسائل، اقرأها كسؤال واحد إذا كانت أجزاء مترابطة.
+إذا وصلت عدة أسئلة كاملة، أجب عنها بالترتيب، كل إجابة في سطر.
+تحقق من الحسابات قبل الإجابة.
+لا تخترع إجابة إذا كانت المعطيات غير كافية.
+أرسل الإجابة النهائية فقط دون شرح أو مقدمات.
+في المعادلات اكتب المتغير وقيمته، مثل: a = 5.
+في الاختيارات اكتب حرف الخيار فقط إذا كان المطلوب اختيار حرف.
+لا تكتب عبارات مثل: الإجابة الصحيحة هي.
+`
+      }
+    });
+
+    return (response.text || '').trim();
+  }
+
+  const allowedSender = process.env.ALLOWED_SENDER || '';
+
+  const pending = new Map();
+  const seen = new Set();
+
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
 
-    for (const message of messages) {
+    for (const msg of messages) {
       try {
-        if (!message.message || message.key.fromMe) continue;
+        if (!msg.message || msg.key.fromMe) continue;
 
-        const jid = message.key.remoteJid;
+        const jid = msg.key.remoteJid;
 
-        if (!jid || jid.endsWith('@g.us') || jid === 'status@broadcast') {
+        if (
+          !jid ||
+          jid.endsWith('@g.us') ||
+          jid === 'status@broadcast'
+        ) continue;
+
+        const id = msg.key.id;
+
+        if (id && seen.has(id)) continue;
+
+        if (id) {
+          seen.add(id);
+          if (seen.size > 3000) {
+            seen.clear();
+          }
+        }
+
+        console.log('Incoming sender:', jid);
+
+        if (!allowedSender || jid !== allowedSender) {
+          console.log('Sender not authorized. Check ALLOWED_SENDER.');
           continue;
         }
 
-        console.log('Sender JID:', jid);
-
-        if (ALLOWED_SENDER && jid !== ALLOWED_SENDER) {
-          continue;
-        }
-
-        const text = extractText(message.message);
+        const text = getText(msg.message).trim();
         if (!text) continue;
 
-        console.log('Incoming text received');
+        let item = pending.get(jid);
 
-        const answer = solveQuestion(text, math, nerdamer);
-
-        if (answer) {
-          await sock.sendMessage(jid, { text: answer });
-          console.log('Answer sent');
-        } else {
-          console.log('No mathematical answer found');
+        if (!item) {
+          item = { parts: [], timer: null };
+          pending.set(jid, item);
         }
+
+        item.parts.push(text);
+
+        clearTimeout(item.timer);
+
+        item.timer = setTimeout(async () => {
+          pending.delete(jid);
+
+          const question = item.parts.join('\n');
+
+          try {
+            console.log('Sending question to Gemini...');
+
+            const answer = await solveWithAI(question);
+
+            if (!answer) {
+              console.log('Gemini returned an empty answer.');
+              return;
+            }
+
+            await sock.sendMessage(jid, {
+              text: answer
+            });
+
+            console.log('Answer sent successfully.');
+
+          } catch (error) {
+            console.error('Gemini/message error:', error.message);
+          }
+        }, 2000);
+
       } catch (error) {
-        console.log('Message error:', error.message);
+        console.error('Incoming message error:', error.message);
       }
     }
   });
 }
 
 startBot().catch(error => {
-  console.error('Bot startup error:', error);
+  console.error('Startup error:', error);
 });
