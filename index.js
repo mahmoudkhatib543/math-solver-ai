@@ -4,18 +4,15 @@ const QRCode = require('qrcode');
 
 const PORT = process.env.PORT || 3000;
 const QR_VIEW_TOKEN = process.env.QR_VIEW_TOKEN;
+const GEMINI_MODEL = 'gemini-3.8-flash';
 
 let latestQR = null;
 
-// خادم عرض QR
 http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
 
   if (url.pathname === '/qr') {
-    if (
-      !QR_VIEW_TOKEN ||
-      url.searchParams.get('token') !== QR_VIEW_TOKEN
-    ) {
+    if (!QR_VIEW_TOKEN || url.searchParams.get('token') !== QR_VIEW_TOKEN) {
       res.writeHead(403);
       return res.end('Forbidden');
     }
@@ -51,19 +48,20 @@ http.createServer(async (req, res) => {
         </html>
       `);
     } catch (error) {
+      console.error('QR error:', error.message);
       res.writeHead(500);
       return res.end('QR error');
     }
   }
 
-  res.writeHead(200);
+  res.writeHead(200, {
+    'Content-Type': 'text/plain; charset=utf-8'
+  });
   res.end('WhatsApp AI Solver is running!');
 }).listen(PORT, () => {
   console.log('Web server running on port', PORT);
 });
 
-
-// تشغيل واتساب
 async function startWhatsApp() {
   try {
     const {
@@ -109,7 +107,6 @@ async function startWhatsApp() {
       }
     });
 
-    // تجميع أجزاء السؤال
     const messageBuffers = new Map();
 
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
@@ -121,10 +118,12 @@ async function startWhatsApp() {
         const jid = msg.key.remoteJid;
 
         if (!jid || jid === 'status@broadcast') continue;
+        if (jid.endsWith('@g.us')) continue;
 
         const allowedSender = process.env.ALLOWED_SENDER;
 
         if (allowedSender && jid !== allowedSender) {
+          console.log('Message ignored: sender not allowed.');
           continue;
         }
 
@@ -137,6 +136,14 @@ async function startWhatsApp() {
 
           if (message.extendedTextMessage?.text) {
             return message.extendedTextMessage.text;
+          }
+
+          if (message.imageMessage?.caption) {
+            return message.imageMessage.caption;
+          }
+
+          if (message.documentMessage?.caption) {
+            return message.documentMessage.caption;
           }
 
           if (message.ephemeralMessage?.message) {
@@ -154,18 +161,21 @@ async function startWhatsApp() {
           return '';
         }
 
-        const text = getText(msg.message).trim();
+        const question = getText(msg.message).trim();
 
-        if (!text) continue;
+        if (!question) {
+          console.log('Message received, but it has no supported text.');
+          continue;
+        }
 
         const old = messageBuffers.get(jid);
 
         if (old) {
           clearTimeout(old.timer);
-          old.text += '\n' + text;
+          old.text += '\n' + question;
         } else {
           messageBuffers.set(jid, {
-            text: text,
+            text: question,
             timer: null
           });
         }
@@ -175,91 +185,108 @@ async function startWhatsApp() {
         current.timer = setTimeout(async () => {
           messageBuffers.delete(jid);
 
-          try {
-            console.log('Solving question from:', jid);
+          console.log('Solving question from:', jid);
+          console.log('Question length:', current.text.length);
 
+          try {
             const answer = await solveWithGemini(current.text);
 
-            if (answer) {
-              await sock.sendMessage(jid, {
-                text: answer.trim()
-              });
+            console.log('Gemini answer received.');
 
-              console.log('Answer sent.');
-            }
+            await sock.sendMessage(jid, {
+              text: answer
+            });
+
+            console.log('Answer sent successfully.');
           } catch (error) {
-            console.log('Answer error:', error.message);
+            console.error('Answer error:', error.message);
           }
         }, 1800);
       }
     });
 
   } catch (error) {
-    console.log('WhatsApp startup error:', error.message);
+    console.error('WhatsApp startup error:', error.message);
     setTimeout(startWhatsApp, 10000);
   }
 }
 
-
-// حل الأسئلة باستخدام Gemini
 async function solveWithGemini(question) {
   const apiKey = process.env.GEMINI_API_KEY;
 
   if (!apiKey) {
-    throw new Error('GEMINI_API_KEY is missing');
+    throw new Error('GEMINI_API_KEY is missing in Render Environment.');
   }
 
-  const model = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
+  console.log('Sending question to Gemini model:', GEMINI_MODEL);
 
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=` +
-      encodeURIComponent(apiKey),
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        contents: [
-          {
-            parts: [
-              {
-                text:
-                  'أنت مساعد متخصص في حل المسائل والأسئلة الدراسية. ' +
-                  'حل السؤال بدقة، سواء كان رياضيات أو علوم أو سؤال نصي أو اختيار من متعدد. ' +
-                  'إذا كان السؤال يحتوي خيارات، اختر الإجابة الصحيحة. ' +
-                  'أرسل الإجابة النهائية فقط، بدون شرح أو مقدمة أو خطوات. ' +
-                  'إذا كانت الإجابة حرفاً مثل A أو B فأرسل الحرف فقط.\n\n' +
-                  'السؤال:\n' + question
-              }
-            ]
-          }
-        ],
-        generationConfig: {
-          temperature: 0.2
-        }
-      })
-    }
-  );
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 45000);
 
-  const data = await response.json();
-
-  if (!response.ok) {
-    throw new Error(
-      data.error?.message || 'Gemini API request failed'
+  try {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=` +
+        encodeURIComponent(apiKey),
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        signal: controller.signal,
+        body: JSON.stringify({
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                {
+                  text:
+                    'أنت مساعد متخصص في حل الأسئلة الدراسية. ' +
+                    'حل المسائل الرياضية والعلوم والأسئلة النصية والاختيارات المتعددة بدقة. ' +
+                    'إذا وجدت خيارات، اختر الإجابة الصحيحة. ' +
+                    'أرسل الإجابة النهائية فقط، دون شرح أو مقدمة أو خطوات. ' +
+                    'إذا كانت الإجابة حرفًا مثل A أو B فأرسل الحرف فقط.\n\n' +
+                    'السؤال:\n' + question
+                }
+              ]
+            }
+          ]
+        })
+      }
     );
+
+    const data = await response.json();
+
+    console.log('Gemini HTTP Status:', response.status);
+
+    if (!response.ok) {
+      const message = data.error?.message || JSON.stringify(data);
+      throw new Error(`Gemini API error (${response.status}): ${message}`);
+    }
+
+    const answer = data.candidates?.[0]?.content?.parts
+      ?.map(part => part.text || '')
+      .join('')
+      .trim();
+
+    if (!answer) {
+      console.log('Gemini returned no text:', JSON.stringify(data).slice(0, 1500));
+      throw new Error(
+        data.promptFeedback?.blockReason ||
+        data.candidates?.[0]?.finishReason ||
+        'Gemini returned an empty answer'
+      );
+    }
+
+    return answer;
+
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      throw new Error('Gemini request timed out after 45 seconds.');
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
   }
-
-  const answer = data.candidates?.[0]?.content?.parts
-    ?.map(part => part.text || '')
-    .join('')
-    .trim();
-
-  if (!answer) {
-    throw new Error('No answer returned');
-  }
-
-  return answer;
 }
 
 startWhatsApp();
