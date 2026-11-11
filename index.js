@@ -6,103 +6,176 @@ const PORT = process.env.PORT || 3000;
 const ALLOWED_SENDER = process.env.ALLOWED_SENDER || '';
 
 http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.writeHead(200);
   res.end('WhatsApp Math Bot is running!');
-}).listen(PORT, '0.0.0.0', () => {
+}).listen(PORT, () => {
   console.log('Web server running on port', PORT);
 });
 
-function normalizeArabic(text) {
-  const digits = '٠١٢٣٤٥٦٧٨٩';
+function normalize(text) {
   return text
-    .replace(/[٠-٩]/g, d => digits.indexOf(d))
-    .replace(/٫/g, '.')
-    .replace(/[×✖]/g, '*')
-    .replace(/[÷]/g, '/')
+    .replace(/[٠-٩]/g, d => '٠١٢٣٤٥٦٧٨٩'.indexOf(d))
+    .replace(/×/g, '*')
+    .replace(/÷/g, '/')
     .replace(/[−–]/g, '-')
-    .replace(/,/g, '.');
+    .replace(/٫/g, '.')
+    .replace(/,/g, '.')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
-function getAnswer(text, math) {
-  const normalized = normalizeArabic(text);
-  const parts = normalized.split(/(?:أوجد|اوجد|احسب|حل)\s*(?:حل)?\s*[:：]?\s*/);
-  const candidate = parts.length > 1 ? parts[parts.length - 1] : normalized;
+function extractText(message) {
+  if (!message) return '';
 
-  const match = candidate.match(/[0-9+\-*/().\s^]+/);
-  if (!match) return null;
-
-  const expression = match[0].trim();
-  if (!expression || !/[0-9]/.test(expression)) return null;
-
-  try {
-    const result = math.evaluate(expression);
-    if (typeof result !== 'number' || !Number.isFinite(result)) return null;
-    return Number.isInteger(result) ? String(result) : String(Number(result.toFixed(8)));
-  } catch {
-    return null;
+  if (message.ephemeralMessage) {
+    return extractText(message.ephemeralMessage.message);
   }
+
+  if (message.viewOnceMessage) {
+    return extractText(message.viewOnceMessage.message);
+  }
+
+  return (
+    message.conversation ||
+    message.extendedTextMessage?.text ||
+    message.documentMessage?.caption ||
+    ''
+  );
+}
+
+function solveQuestion(text, math, nerdamer) {
+  const clean = normalize(text);
+
+  // المعادلات
+  const equations = clean.match(
+    /[0-9a-zA-Z().+\-*/^ \t]+=[0-9a-zA-Z().+\-*/^ \t]+/g
+  );
+
+  if (equations) {
+    for (const equation of equations) {
+      const variables = [...new Set(
+        equation.match(/[a-zA-Z]/g) || []
+      )];
+
+      if (variables.length === 1) {
+        try {
+          const variable = variables[0];
+          const result = nerdamer
+            .solve(equation.trim(), variable)
+            .toString()
+            .replace(/^\[|\]$/g, '');
+
+          if (result && result !== '[]') {
+            return `${variable} = ${result}`;
+          }
+        } catch (e) {
+          console.log('Equation error:', e.message);
+        }
+      }
+    }
+  }
+
+  // العمليات الحسابية
+  const expressions = clean.match(
+    /[0-9][0-9().+\-*/^ \t]*[+\-*/^][0-9().+\-*/^ \t]*/g
+  );
+
+  if (expressions) {
+    for (const expression of expressions) {
+      try {
+        const result = math.evaluate(expression.trim());
+
+        if (typeof result === 'number' && Number.isFinite(result)) {
+          return String(Number(result.toFixed(8)));
+        }
+      } catch (e) {}
+    }
+  }
+
+  return null;
 }
 
 async function startBot() {
-  const baileys = await import('@whiskeysockets/baileys');
-  const math = await import('mathjs');
+  const {
+    default: makeWASocket,
+    useMultiFileAuthState,
+    DisconnectReason
+  } = await import('@whiskeysockets/baileys');
+
+  const math = require('mathjs');
+  const nerdamer = require('nerdamer');
 
   const { state, saveCreds } =
-    await baileys.useMultiFileAuthState('./auth_info');
+    await useMultiFileAuthState('./auth_info');
 
-  const sock = baileys.default({
+  const sock = makeWASocket({
     auth: state,
     printQRInTerminal: false
   });
 
   sock.ev.on('creds.update', saveCreds);
 
-  sock.ev.on('connection.update', update => {
-    if (update.qr) {
-      console.log('SCAN THIS QR WITH WHATSAPP:');
-  const qrUrl = 'https://quickchart.io/qr?text=' + encodeURIComponent(update.qr) + '&size=500';
-console.log('QR IMAGE LINK:', qrUrl);
+  sock.ev.on('connection.update', ({ connection, qr, lastDisconnect }) => {
+    if (qr) {
+      console.log('SCAN THIS QR CODE:');
+      qrcode.generate(qr, { small: true });
     }
 
-    if (update.connection === 'open') {
+    if (connection === 'open') {
       console.log('WhatsApp connected!');
     }
 
-    if (update.connection === 'close') {
-      console.log('WhatsApp disconnected. Restarting...');
-      setTimeout(startBot, 5000);
+    if (connection === 'close') {
+      const status = lastDisconnect?.error?.output?.statusCode;
+
+      if (status !== DisconnectReason.loggedOut) {
+        console.log('Connection closed. Restarting...');
+        setTimeout(startBot, 5000);
+      } else {
+        console.log('WhatsApp logged out. New pairing required.');
+      }
     }
   });
 
-  sock.ev.on('messages.upsert', async ({ messages }) => {
-    for (const msg of messages) {
-      if (!msg.message || msg.key.fromMe) continue;
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (type !== 'notify') return;
 
-      const jid = msg.key.remoteJid;
-      if (!jid || !jid.endsWith('@s.whatsapp.net')) continue;
+    for (const message of messages) {
+      try {
+        if (!message.message || message.key.fromMe) continue;
 
-      const text =
-        msg.message.conversation ||
-        msg.message.extendedTextMessage?.text ||
-        '';
+        const jid = message.key.remoteJid;
 
-      if (!text) continue;
+        if (!jid || jid.endsWith('@g.us') || jid === 'status@broadcast') {
+          continue;
+        }
 
-      if (!ALLOWED_SENDER) {
         console.log('Sender JID:', jid);
-        continue;
-      }
 
-      if (jid !== ALLOWED_SENDER) continue;
+        if (ALLOWED_SENDER && jid !== ALLOWED_SENDER) {
+          continue;
+        }
 
-      const answer = getAnswer(text, math);
+        const text = extractText(message.message);
+        if (!text) continue;
 
-      if (answer !== null) {
-        await sock.sendMessage(jid, { text: answer });
-        console.log('Answer sent.');
+        console.log('Incoming text received');
+
+        const answer = solveQuestion(text, math, nerdamer);
+
+        if (answer) {
+          await sock.sendMessage(jid, { text: answer });
+          console.log('Answer sent');
+        } else {
+          console.log('No mathematical answer found');
+        }
+      } catch (error) {
+        console.log('Message error:', error.message);
       }
     }
   });
 }
 
-startBot().catch(err => console.error('Bot error:', err));
+startBot().catch(error => {
+  console.error('Bot startup error:', error);
+});
