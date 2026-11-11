@@ -1,204 +1,260 @@
 
 const http = require('http');
+const QRCode = require('qrcode');
 
 const PORT = process.env.PORT || 3000;
+const QR_VIEW_TOKEN = process.env.QR_VIEW_TOKEN;
 
-http.createServer((req, res) => {
+let latestQR = null;
+
+// صفحة عرض QR المحمية بكلمة سر
+http.createServer(async (req, res) => {
+  const url = new URL(req.url, 'http://localhost');
+
+  if (url.pathname === '/qr') {
+    if (
+      !QR_VIEW_TOKEN ||
+      url.searchParams.get('token') !== QR_VIEW_TOKEN
+    ) {
+      res.writeHead(403);
+      return res.end('Forbidden');
+    }
+
+    if (!latestQR) {
+      res.writeHead(404);
+      return res.end('QR not ready. Refresh later.');
+    }
+
+    try {
+      const image = await QRCode.toDataURL(latestQR, {
+        width: 360,
+        margin: 2
+      });
+
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-store'
+      });
+
+      return res.end(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>WhatsApp QR</title>
+        </head>
+        <body style="text-align:center;font-family:Arial;padding:20px">
+          <h2>WhatsApp QR</h2>
+          <img src="${image}" style="width:360px;max-width:100%">
+          <p>امسح الرمز من واتساب</p>
+        </body>
+        </html>
+      `);
+    } catch (error) {
+      res.writeHead(500);
+      return res.end('QR error');
+    }
+  }
+
   res.writeHead(200);
-  res.end('WhatsApp Gemini AI Bot is running!');
+  res.end('WhatsApp AI Solver is running!');
 }).listen(PORT, () => {
   console.log('Web server running on port', PORT);
 });
 
-async function startBot() {
-  if (!process.env.GEMINI_API_KEY) {
-    throw new Error('GEMINI_API_KEY is missing');
-  }
 
-  const baileys = await import('@whiskeysockets/baileys');
-  const makeWASocket = baileys.default || baileys.makeWASocket;
-  const { useMultiFileAuthState, DisconnectReason } = baileys;
+// تشغيل واتساب
+async function startWhatsApp() {
+  try {
+    const {
+      default: makeWASocket,
+      useMultiFileAuthState,
+      DisconnectReason
+    } = await import('@whiskeysockets/baileys');
 
-  const { GoogleGenAI } = await import('@google/genai');
-  const qrcode = require('qrcode-terminal');
+    const { state, saveCreds } =
+      await useMultiFileAuthState('./auth_info');
 
-  const ai = new GoogleGenAI({
-    apiKey: process.env.GEMINI_API_KEY
-  });
+    const sock = makeWASocket({
+      auth: state,
+      printQRInTerminal: false
+    });
 
-  const { state, saveCreds } =
-    await useMultiFileAuthState('./auth_info');
+    sock.ev.on('creds.update', saveCreds);
 
-  const sock = makeWASocket({
-    auth: state,
-    printQRInTerminal: false
-  });
+    sock.ev.on('connection.update', (update) => {
+      const { connection, qr, lastDisconnect } = update;
 
-  sock.ev.on('creds.update', saveCreds);
-
-  sock.ev.on('connection.update', ({ connection, qr, lastDisconnect }) => {
-    if (qr) {
-      console.log('NEW WHATSAPP QR:');
-      qrcode.generate(qr, { small: true });
-    }
-
-    if (connection === 'open') {
-      console.log('WhatsApp connected!');
-    }
-
-    if (connection === 'close') {
-      const status = lastDisconnect?.error?.output?.statusCode;
-
-      if (status !== DisconnectReason.loggedOut) {
-        console.log('Connection closed. Restarting...');
-        setTimeout(() => startBot().catch(console.error), 5000);
-      } else {
-        console.log('WhatsApp logged out. Pairing required.');
+      if (qr) {
+        latestQR = qr;
+        console.log('QR is ready. Open your private QR link.');
       }
-    }
-  });
 
-  function getText(message) {
-    if (!message) return '';
+      if (connection === 'open') {
+        latestQR = null;
+        console.log('WhatsApp connected!');
+      }
 
-    if (message.ephemeralMessage) {
-      return getText(message.ephemeralMessage.message);
-    }
+      if (connection === 'close') {
+        const code =
+          lastDisconnect?.error?.output?.statusCode;
 
-    if (message.viewOnceMessage) {
-      return getText(message.viewOnceMessage.message);
-    }
+        console.log('WhatsApp connection closed:', code);
 
-    if (message.viewOnceMessageV2) {
-      return getText(message.viewOnceMessageV2.message);
-    }
-
-    return (
-      message.conversation ||
-      message.extendedTextMessage?.text ||
-      message.imageMessage?.caption ||
-      message.videoMessage?.caption ||
-      message.documentMessage?.caption ||
-      message.buttonsResponseMessage?.selectedDisplayText ||
-      message.listResponseMessage?.title ||
-      message.templateButtonReplyMessage?.selectedDisplayText ||
-      ''
-    );
-  }
-
-  async function solveWithAI(question) {
-    const response = await ai.models.generateContent({
-      model: process.env.GEMINI_MODEL || 'gemini-flash-latest',
-      contents: question,
-      config: {
-        temperature: 0.1,
-        maxOutputTokens: 400,
-        systemInstruction: `
-أنت مساعد تعليمي متخصص في حل أسئلة الطلاب.
-
-افهم السؤال باللغة العربية أو الإنجليزية.
-حل المعادلات والرياضيات والمسائل الكلامية.
-افهم أسئلة الاختيار من متعدد واختر الإجابة الصحيحة.
-إذا وصل السؤال على عدة رسائل، اقرأها كسؤال واحد إذا كانت أجزاء مترابطة.
-إذا وصلت عدة أسئلة كاملة، أجب عنها بالترتيب، كل إجابة في سطر.
-تحقق من الحسابات قبل الإجابة.
-لا تخترع إجابة إذا كانت المعطيات غير كافية.
-أرسل الإجابة النهائية فقط دون شرح أو مقدمات.
-في المعادلات اكتب المتغير وقيمته، مثل: a = 5.
-في الاختيارات اكتب حرف الخيار فقط إذا كان المطلوب اختيار حرف.
-لا تكتب عبارات مثل: الإجابة الصحيحة هي.
-`
+        if (code !== DisconnectReason.loggedOut) {
+          setTimeout(() => startWhatsApp(), 5000);
+        } else {
+          console.log('WhatsApp logged out. Re-link required.');
+        }
       }
     });
 
-    return (response.text || '').trim();
-  }
+    // تجميع أجزاء السؤال من نفس المرسل
+    const messageBuffers = new Map();
 
-  const allowedSender = process.env.ALLOWED_SENDER || '';
+    sock.ev.on('messages.upsert', async ({ messages, type }) => {
+      if (type !== 'notify') return;
 
-  const pending = new Map();
-  const seen = new Set();
-
-  sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    if (type !== 'notify') return;
-
-    for (const msg of messages) {
-      try {
+      for (const msg of messages) {
         if (!msg.message || msg.key.fromMe) continue;
 
         const jid = msg.key.remoteJid;
 
-        if (
-          !jid ||
-          jid.endsWith('@g.us') ||
-          jid === 'status@broadcast'
-        ) continue;
+        if (!jid || jid === 'status@broadcast') continue;
 
-        const id = msg.key.id;
+        const allowedSender = process.env.ALLOWED_SENDER;
 
-        if (id && seen.has(id)) continue;
-
-        if (id) {
-          seen.add(id);
-          if (seen.size > 3000) {
-            seen.clear();
-          }
-        }
-
-        console.log('Incoming sender:', jid);
-
-        if (!allowedSender || jid !== allowedSender) {
-          console.log('Sender not authorized. Check ALLOWED_SENDER.');
+        if (allowedSender && jid !== allowedSender) {
           continue;
         }
 
-        const text = getText(msg.message).trim();
-        if (!text) continue;
+        function getText(message) {
+          if (!message) return '';
 
-        let item = pending.get(jid);
+          if (message.conversation) {
+            return message.conversation;
+          }
 
-        if (!item) {
-          item = { parts: [], timer: null };
-          pending.set(jid, item);
+          if (message.extendedTextMessage?.text) {
+            return message.extendedTextMessage.text;
+          }
+
+          if (message.ephemeralMessage?.message) {
+            return getText(message.ephemeralMessage.message);
+          }
+
+          if (message.viewOnceMessage?.message) {
+            return getText(message.viewOnceMessage.message);
+          }
+
+          if (message.viewOnceMessageV2?.message) {
+            return getText(message.viewOnceMessageV2.message);
+          }
+
+          return '';
         }
 
-        item.parts.push(text);
+        const text = getText(msg.message).trim();
 
-        clearTimeout(item.timer);
+        if (!text) continue;
 
-        item.timer = setTimeout(async () => {
-          pending.delete(jid);
+        const old = messageBuffers.get(jid);
 
-          const question = item.parts.join('\n');
+        if (old) {
+          clearTimeout(old.timer);
+          old.text += '\n' + text;
+        } else {
+          messageBuffers.set(jid, {
+            text: text,
+            timer: null
+          });
+        }
+
+        const current = messageBuffers.get(jid);
+
+        current.timer = setTimeout(async () => {
+          messageBuffers.delete(jid);
 
           try {
-            console.log('Sending question to Gemini...');
+            const answer = await solveWithGemini(current.text);
 
-            const answer = await solveWithAI(question);
-
-            if (!answer) {
-              console.log('Gemini returned an empty answer.');
-              return;
+            if (answer) {
+              await sock.sendMessage(jid, {
+                text: answer.trim()
+              });
+              console.log('Answer sent.');
             }
-
-            await sock.sendMessage(jid, {
-              text: answer
-            });
-
-            console.log('Answer sent successfully.');
-
           } catch (error) {
-            console.error('Gemini/message error:', error.message);
+            console.log('Answer error:', error.message);
           }
-        }, 2000);
-
-      } catch (error) {
-        console.error('Incoming message error:', error.message);
+        }, 1800);
       }
-    }
-  });
+    });
+
+  } catch (error) {
+    console.log('WhatsApp startup error:', error.message);
+    setTimeout(startWhatsApp, 10000);
+  }
 }
 
-startBot().catch(error => {
-  console.error('Startup error:', error);
-});
+
+// حل الأسئلة باستخدام Gemini
+async function solveWithGemini(question) {
+  const apiKey = process.env.GEMINI_API_KEY;
+
+  if (!apiKey) {
+    throw new Error('GEMINI_API_KEY is missing');
+  }
+
+  const response = await fetch(
+    'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=' +
+      encodeURIComponent(apiKey),
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        contents: [
+          {
+            parts: [
+              {
+                text:
+                  'أنت مساعد متخصص في حل المسائل والأسئلة الدراسية. ' +
+                  'حل السؤال بدقة، سواء كان رياضيات أو علوم أو سؤال نصي أو اختيار من متعدد. ' +
+                  'إذا كان السؤال يحتوي خيارات، اختر الإجابة الصحيحة. ' +
+                  'أرسل الإجابة النهائية فقط، بدون شرح أو مقدمة أو خطوات. ' +
+                  'إذا كانت الإجابة حرفاً مثل A أو B فأرسل الحرف فقط.\n\n' +
+                  'السؤال:\n' + question
+              }
+            ]
+          }
+        ],
+        generationConfig: {
+          temperature: 0.2
+        }
+      })
+    }
+  );
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(
+      data.error?.message || 'Gemini API request failed'
+    );
+  }
+
+  const answer = data.candidates?.[0]?.content?.parts
+    ?.map(part => part.text || '')
+    .join('')
+    .trim();
+
+  if (!answer) {
+    throw new Error('No answer returned');
+  }
+
+  return answer;
+}
+
+startWhatsApp();
