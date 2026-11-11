@@ -1,4 +1,3 @@
-
 {
   "name": "math-solver-whatsapp",
   "version": "1.0.0",
@@ -8,8 +7,10 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "@google/genai": "latest",
     "@whiskeysockets/baileys": "latest",
-    "qrcode-terminal": "latest"
+    "mathjs": "latest",
+    "qrcode-terminal": "latest",
+    "qrcode": "^1.5.4",
+    "nerdamer": "latest"
   }
 }
