@@ -60,7 +60,8 @@ async function startBot() {
   sock.ev.on('connection.update', update => {
     if (update.qr) {
       console.log('SCAN THIS QR WITH WHATSAPP:');
-      qrcode.generate(update.qr, { small: true });
+  const qrUrl = 'https://quickchart.io/qr?text=' + encodeURIComponent(update.qr) + '&size=500';
+console.log('QR IMAGE LINK:', qrUrl);
     }
 
     if (update.connection === 'open') {
