@@ -8,9 +8,8 @@
     "start": "node index.js"
   },
   "dependencies": {
+    "@google/genai": "latest",
     "@whiskeysockets/baileys": "latest",
-    "mathjs": "latest",
-    "qrcode-terminal": "latest",
-    "nerdamer": "latest"
+    "qrcode-terminal": "latest"
   }
 }
