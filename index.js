@@ -7,7 +7,7 @@ const QR_VIEW_TOKEN = process.env.QR_VIEW_TOKEN;
 
 let latestQR = null;
 
-// صفحة عرض QR المحمية بكلمة سر
+// خادم عرض QR
 http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
 
@@ -109,7 +109,7 @@ async function startWhatsApp() {
       }
     });
 
-    // تجميع أجزاء السؤال من نفس المرسل
+    // تجميع أجزاء السؤال
     const messageBuffers = new Map();
 
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
@@ -176,12 +176,15 @@ async function startWhatsApp() {
           messageBuffers.delete(jid);
 
           try {
+            console.log('Solving question from:', jid);
+
             const answer = await solveWithGemini(current.text);
 
             if (answer) {
               await sock.sendMessage(jid, {
                 text: answer.trim()
               });
+
               console.log('Answer sent.');
             }
           } catch (error) {
@@ -206,8 +209,10 @@ async function solveWithGemini(question) {
     throw new Error('GEMINI_API_KEY is missing');
   }
 
+  const model = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
+
   const response = await fetch(
-    'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=' +
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=` +
       encodeURIComponent(apiKey),
     {
       method: 'POST',
