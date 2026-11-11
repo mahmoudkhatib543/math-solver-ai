@@ -83,6 +83,12 @@ async function startWhatsApp() {
     sock.ev.on('connection.update', (update) => {
       const { connection, qr, lastDisconnect } = update;
 
+      console.log('CONNECTION UPDATE:', JSON.stringify({
+        connection,
+        hasQR: !!qr,
+        statusCode: lastDisconnect?.error?.output?.statusCode
+      }));
+
       if (qr) {
         latestQR = qr;
         console.log('QR is ready. Open your private QR link.');
@@ -110,6 +116,13 @@ async function startWhatsApp() {
     const messageBuffers = new Map();
 
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
+      console.log(
+        'MESSAGE EVENT:',
+        type,
+        'COUNT:',
+        messages.length
+      );
+
       if (type !== 'notify') return;
 
       for (const msg of messages) {
@@ -168,6 +181,8 @@ async function startWhatsApp() {
           continue;
         }
 
+        console.log('INCOMING TEXT:', question);
+
         const old = messageBuffers.get(jid);
 
         if (old) {
@@ -204,6 +219,8 @@ async function startWhatsApp() {
         }, 1800);
       }
     });
+
+    console.log('WhatsApp socket created. Waiting for connection...');
 
   } catch (error) {
     console.error('WhatsApp startup error:', error.message);
@@ -269,7 +286,11 @@ async function solveWithGemini(question) {
       .trim();
 
     if (!answer) {
-      console.log('Gemini returned no text:', JSON.stringify(data).slice(0, 1500));
+      console.log(
+        'Gemini returned no text:',
+        JSON.stringify(data).slice(0, 1500)
+      );
+
       throw new Error(
         data.promptFeedback?.blockReason ||
         data.candidates?.[0]?.finishReason ||
@@ -283,6 +304,7 @@ async function solveWithGemini(question) {
     if (error.name === 'AbortError') {
       throw new Error('Gemini request timed out after 45 seconds.');
     }
+
     throw error;
   } finally {
     clearTimeout(timeout);
